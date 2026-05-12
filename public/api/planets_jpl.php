@@ -232,7 +232,7 @@ function jpl_fetch_elements(string $target, string $epochUtc, string $cacheDir):
     'CSV_FORMAT'  => "'YES'",
     'OBJ_DATA'    => "'NO'",
     'TLIST'       => "'$epochUtc'", // 'YYYY-MM-DD HH:MM' UTC
-    'TIME_TYPE'   => "'UTC'",       // UTC input avoids ~69s TDB-UTC offset
+    'TIME_TYPE'   => "'TDB'",       // ELEMENTS ephemeris requires TDB
     'TP_TYPE'     => "'ABSOLUTE'",
     'MAKE_EPHEM'  => "'YES'",
     'OUT_UNITS'   => "'AU-D'",

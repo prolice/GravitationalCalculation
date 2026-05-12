@@ -483,6 +483,8 @@
   if (btnStep)      { btnStep.addEventListener('click', () => { if (ticker.running) { ticker.pause(); btnPlayPause.textContent = '▶️ Lecture'; } ticker.step(); updateSimTimeLabel(ticker.simTime); updateCalendarLabels(ticker.simTime); }); }
   if (btnResetTime) { btnResetTime.addEventListener('click', () => {
       ticker.reset();
+      killNBody();
+      resetEvtState();
       state.forEach(s => { s.trail.length = 0; (s.moons||[]).forEach(m=>m.trail&&(m.trail.length=0)); });
       updateSimTimeLabel(0); updateCalendarLabels(0); drawScene(0);
       if (timelineSlider) { timelineSlider.value = '0'; if (timelineYearsLabel) timelineYearsLabel.textContent = '0.00'; }
@@ -855,14 +857,18 @@
         precession_deg_per_orbit: precess_deg_per_orbit,
         mass_kg, inc_deg, node_deg, moons
       });
-      // BUG 2: preserve JPL-derived M₀ and ω₀ across rebuilds
+      // Step 4: preserve JPL-derived M₀/ω₀ and extrapolate M to current sim time
       const _jpl = (window.PLANET_ELEM || {})[name] || null;
       const _M0  = (_jpl && Number.isFinite(_jpl.M_deg))  ? _jpl.M_deg  * Math.PI / 180 : 0;
       const _w0  = (_jpl && Number.isFinite(_jpl.w_deg))  ? _jpl.w_deg  : 0;
-      state.push({ M: _M0, omegaDeg: _w0, trail: [], scrX: null, scrY: null, moons: moonStates });
+      const _n   = (period_s > 0) ? 2 * Math.PI / period_s : 0;
+      const _Mnow = _M0 + _n * (ticker.simTime || 0);
+      state.push({ M: _Mnow, omegaDeg: _w0, trail: [], scrX: null, scrY: null, moons: moonStates });
     });
     recomputeScale();
     rebuildLegend();
+    killNBody();       // Step 5: worker state is stale after planet-list change
+    resetEvtState();   // Step 3: stale distances would corrupt perihelion detection
 	  // (nouveau) mettre à jour le sélecteur "Corps" après toute reconstruction
 	dispatchEvent(new CustomEvent('planets:updated', { detail: { count: planets.length }}));
 	if (typeof refreshTsBodyOptions === 'function') refreshTsBodyOptions();
@@ -1102,14 +1108,13 @@
   }
   
   function detectEvents(simSec){
-    const nowMs = performance.now();
-    if (nowMs - (evtState.lastCheckRealMs||0) < 120) return; // throttle ~8 Hz
-    evtState.lastCheckRealMs = nowMs;
+    // Step 1: throttle on simulation time (6 h sim), not wall-clock time
+    if (simSec - evtState.lastCheckSimSec < 6 * 3600) return;
+    evtState.lastCheckSimSec = simSec;
 
-    const jd = jdNow(simSec);
     const eIdx = earthIndex();
 
-    // 1) Perihelion/Aphélion (per-planet)
+    // 1) Perihelion/Aphélion (per-planet) — Step 2: interpolated crossing time
     if (evtPeri && evtPeri.checked){
       planets.forEach((p, i) => {
         if (!p.visible || !(p.period_s>0)) return;
@@ -1117,19 +1122,25 @@
         const r = Math.hypot(pos[0], pos[1], pos[2]);
         const rPrev = evtState.rPrev.get(i);
         if (rPrev != null){
-          const dr = r - rPrev;
-          const signPrev = evtState.drSign.get(i);
-          const signNow = Math.sign(dr);
+          const drNow  = r - rPrev;
+          const drPrev = evtState.drPrev.get(i) ?? drNow;
+          const signPrev = Math.sign(drPrev);
+          const signNow  = Math.sign(drNow);
           if (signPrev && signNow && signPrev !== signNow){
-            // extremum
-            if (signPrev < 0 && signNow > 0) pushEvent(jd, 'Périhélie', `${p.name}`);
-            if (signPrev > 0 && signNow < 0) pushEvent(jd, 'Aphélie', `${p.name}`);
+            // interpolate to the exact zero-crossing
+            const sPrev = evtState.simSecPrev.get(i) ?? simSec;
+            const absDrP = Math.abs(drPrev), absDrN = Math.abs(drNow);
+            const frac   = absDrP / (absDrP + absDrN);
+            const jdX    = jdNow(sPrev + frac * (simSec - sPrev));
+            if (signPrev < 0) pushEvent(jdX, 'Périhélie', `${p.name}`);
+            else              pushEvent(jdX, 'Aphélie',   `${p.name}`);
           }
-          evtState.drSign.set(i, signNow);
+          evtState.drPrev.set(i, drNow);
         } else {
-          evtState.drSign.set(i, 0);
+          evtState.drPrev.set(i, 0);
         }
         evtState.rPrev.set(i, r);
+        evtState.simSecPrev.set(i, simSec);
       });
     }
 
@@ -1597,6 +1608,7 @@
       if (isNaN(d.getTime())) return;
       baseEpochJD = jdFromUTCDate(d);
       EPOCH_JD = baseEpochJD;
+      resetEvtState();
       window.dispatchEvent(new CustomEvent('EPOCH_UPDATED', { detail: { epochJD: baseEpochJD } }));
       updateCalendarLabels(ticker.simTime);
       updateSimTimeLabel(ticker.simTime);
@@ -1652,14 +1664,23 @@
 
   // --- Event engine state ---
   const evtState = {
-    // per-planet previous values
     rPrev: new Map(), drSign: new Map(),
+    drPrev: new Map(), simSecPrev: new Map(),   // for perihelion interpolation
     conjPrev: new Map(), oppPrev: new Map(),
     eclipsePrev: null,
     resonanceAnnounced: new Set(),
-    lastCheckRealMs: 0,
+    lastCheckSimSec: -Infinity,                 // sim-time throttle (replaces real-time)
     lastChartRealMs: 0
   };
+
+  function resetEvtState() {
+    evtState.rPrev.clear(); evtState.drSign.clear();
+    evtState.drPrev.clear(); evtState.simSecPrev.clear();
+    evtState.conjPrev.clear(); evtState.oppPrev.clear();
+    evtState.eclipsePrev = null;
+    evtState.resonanceAnnounced.clear();
+    evtState.lastCheckSimSec = -Infinity;
+  }
 
   // N-body worker
   let nbodyWorker = null;
@@ -1722,7 +1743,7 @@
 
 		
 	  const _tog = document.getElementById('nbodyMode');
-	  if (_tog) _tog.addEventListener('change', () => { if (_tog.checked) { killNBody(); ensureNBodyStarted(); } else { killNBody(); } drawScene(0); });
+	  if (_tog) _tog.addEventListener('change', () => { killNBody(); resetEvtState(); if (_tog.checked) ensureNBodyStarted(); drawScene(0); });
 	  const _soft = document.getElementById('nbodySoftAU');
 	  if (_soft) _soft.addEventListener('change', () => { if (nbodyWorker) { nbodyWorker.postMessage({ type: 'setsoft', soft_au: Math.max(0, parseFloat(_soft.value || '0') || 0) }); } });
 	  // sync GR toggle to worker when showPrecession changes
@@ -1775,6 +1796,8 @@
       setEpochInputFromJD(baseEpochJD);
     }
     ticker.reset();
+    killNBody();
+    resetEvtState();
     state.forEach(s => { s.trail.length = 0; (s.moons||[]).forEach(m=>m.trail&&(m.trail.length=0)); });
     applyPlanetElementsToState();
     updateCalendarLabels(0);

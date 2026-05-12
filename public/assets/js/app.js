@@ -196,10 +196,50 @@
     } catch(e){ console.error('Export JSON failed', e); }
   });
 
+  // ---- Theme helper ----
+  function isDarkTheme() {
+    return document.documentElement.getAttribute('data-bs-theme') !== 'light';
+  }
+  // Redraw canvas immediately when theme is toggled
+  window.addEventListener('gc-theme-change', function() {
+    _starField = null; // force star-field regeneration if switching back to dark
+    drawScene(0);
+  });
+
+  // ---- Star field (generated once per canvas size) ----
+  let _starField = null;
+  function buildStarField(w, h) {
+    _starField = Array.from({length: 300}, () => ({
+      x: Math.random() * w,
+      y: Math.random() * h,
+      r: 0.4 + Math.random() * 0.8,
+      a: 0.2 + Math.random() * 0.75,
+    }));
+  }
+  function drawStarField(w, h) {
+    if (!_starField) buildStarField(w, h);
+    ctx.save();
+    ctx.fillStyle = '#c8d8f0';
+    _starField.forEach(s => {
+      ctx.globalAlpha = s.a;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, 2 * Math.PI);
+      ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+    ctx.restore();
+  }
+  // Append alpha hex to a 6-digit hex color
+  function withAlpha(hexColor, alpha) {
+    const a = Math.round(alpha * 255).toString(16).padStart(2,'0');
+    return (hexColor && hexColor.startsWith('#') && hexColor.length === 7) ? hexColor + a : hexColor;
+  }
+
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1, r = canvas.getBoundingClientRect();
     canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    _starField = null; // regenerate on resize
   }
   
   // ==== 3D camera & projection helpers ====
@@ -794,12 +834,15 @@
   function drawScene(dtReal) {
     const r = canvas.getBoundingClientRect();
 
+    const _darkTheme = isDarkTheme();
     if (!showTrailChk.checked) {
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = _darkTheme ? '#050a14' : '#ffffff';
       ctx.fillRect(0, 0, r.width, r.height);
+      if (_darkTheme) drawStarField(r.width, r.height);
     } else {
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      ctx.fillStyle = _darkTheme ? 'rgba(5,10,20,0.18)' : 'rgba(255,255,255,0.18)';
       ctx.fillRect(0, 0, r.width, r.height);
+      if (_darkTheme) drawStarField(r.width, r.height);
     }
 
     const cx = r.width / 2, cy = r.height / 2;
@@ -824,10 +867,25 @@
       return parentRadius + 8 + ring;
     }
 
-    // Etoile
-    ctx.fillStyle = '#f59e0b';
+    // Etoile — corona gradient + core
+    const starR = RENDER_SCALE_MODE === 'real' ? 6 : 10;
+    const corona = ctx.createRadialGradient(cx, cy, starR * 0.3, cx, cy, starR * 3.2);
+    if (_darkTheme) {
+      corona.addColorStop(0,   'rgba(255,230,100,0.65)');
+      corona.addColorStop(0.4, 'rgba(255,160,30,0.28)');
+      corona.addColorStop(1,   'rgba(255,100,0,0)');
+    } else {
+      corona.addColorStop(0,   'rgba(255,200,0,0.45)');
+      corona.addColorStop(0.5, 'rgba(255,150,0,0.14)');
+      corona.addColorStop(1,   'rgba(255,100,0,0)');
+    }
+    ctx.fillStyle = corona;
     ctx.beginPath();
-    ctx.arc(cx, cy, RENDER_SCALE_MODE === 'real' ? 6 : 10, 0, 2 * Math.PI);
+    ctx.arc(cx, cy, starR * 3.2, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.fillStyle = _darkTheme ? '#fff9e6' : '#f59e0b';
+    ctx.beginPath();
+    ctx.arc(cx, cy, starR, 0, 2 * Math.PI);
     ctx.fill();
 
     planets.forEach((p, i) => {
@@ -846,14 +904,16 @@
         const pr = planetRadiusPx(p);
         ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(px, py, pr*(scale3d||1), 0, 2*Math.PI); ctx.fill();
         if (showTrailChk.checked){ st.trail.push([px, py]); if (st.trail.length > 800) st.trail.shift();
-          ctx.strokeStyle = p.color; ctx.globalAlpha = 0.7; ctx.beginPath();
+          ctx.strokeStyle = p.color; ctx.globalAlpha = 0.6;
+          ctx.shadowColor = p.color; ctx.shadowBlur = _darkTheme ? 4 : 0;
+          ctx.beginPath();
           for (let t = 0; t < st.trail.length; t++){ const [tx, ty] = st.trail[t]; if (t===0) ctx.moveTo(tx,ty); else ctx.lineTo(tx,ty); }
-          ctx.stroke(); ctx.globalAlpha = 1; } else { st.trail.length = 0; }
+          ctx.stroke(); ctx.globalAlpha = 1; ctx.shadowBlur = 0; } else { st.trail.length = 0; }
         return;
       }
 
 
-      if (!nbodyOn) { ctx.strokeStyle = '#94a3b8';
+      if (!nbodyOn) { ctx.strokeStyle = withAlpha(p.color, 0.3);
       ctx.lineWidth = 1;
       ctx.beginPath();
       const steps = 240;
@@ -897,10 +957,13 @@
       let [xI2q,yI2q,zI2q] = rotateRz(xI1q, yI1q, zI1q, (p.node_deg||0)*Math.PI/180);
       let ppx, ppy, _sc;
       if (use3D) { [ppx, ppy, _sc] = projectToScreen(xI2q, yI2q, zI2q, cx, cy); } else { ppx = cx + xI2q*pxPerAU; ppy = cy + yI2q*pxPerAU; }
-      ctx.fillStyle = '#ef4444';
+      ctx.fillStyle = '#f59e0b';
+      ctx.shadowColor = '#f59e0b';
+      ctx.shadowBlur = _darkTheme ? 6 : 2;
       ctx.beginPath();
       ctx.arc(ppx, ppy, RENDER_SCALE_MODE === 'real' ? 2 : 3, 0, 2 * Math.PI);
       ctx.fill();
+      ctx.shadowBlur = 0;
 
       const pr = planetRadiusPx(p);
       ctx.fillStyle = p.color;
@@ -912,7 +975,9 @@
         st.trail.push([px, py]);
         if (st.trail.length > 800) st.trail.shift();
         ctx.strokeStyle = p.color;
-        ctx.globalAlpha = 0.7;
+        ctx.globalAlpha = 0.6;
+        ctx.shadowColor = p.color;
+        ctx.shadowBlur = _darkTheme ? 4 : 0;
         ctx.beginPath();
         for (let t = 0; t < st.trail.length; t++) {
           const [tx, ty] = st.trail[t];
@@ -920,6 +985,7 @@
         }
         ctx.stroke();
         ctx.globalAlpha = 1;
+        ctx.shadowBlur = 0;
       } else {
         st.trail.length = 0;
       }
@@ -936,7 +1002,7 @@
           const mPad = moonPaddingPx(pr, mi);
           const mrPix = moonRadiusPx(pr);
 
-          ctx.strokeStyle = '#cbd5e1';
+          ctx.strokeStyle = withAlpha(m.color, 0.28);
           ctx.lineWidth = 1;
           ctx.beginPath();
           const msteps = 120;
@@ -975,7 +1041,9 @@
             mst.trail.push([mx, my]);
             if (mst.trail.length > 400) mst.trail.shift();
             ctx.strokeStyle = m.color;
-            ctx.globalAlpha = 0.5;
+            ctx.globalAlpha = 0.45;
+            ctx.shadowColor = m.color;
+            ctx.shadowBlur = _darkTheme ? 3 : 0;
             ctx.beginPath();
             for (let t = 0; t < mst.trail.length; t++) {
               const [tx, ty] = mst.trail[t];
@@ -983,6 +1051,7 @@
             }
             ctx.stroke();
             ctx.globalAlpha = 1;
+            ctx.shadowBlur = 0;
           } else if (mst.trail) {
             mst.trail.length = 0;
           }
@@ -1713,8 +1782,8 @@
 
     // Legend labels
     ctx.setLineDash([]);
-    ctx.font = '10px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    ctx.fillStyle = '#94a3b8';
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    ctx.fillStyle = '#5d7a9a';
     let yoff = 0;
     function label(text){ ctx.fillText(text, cx+8, cy+12+yoff); yoff += 12; }
     if (chkHill && chkHill.checked) label('Hill');

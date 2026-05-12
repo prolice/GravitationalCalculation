@@ -1112,7 +1112,9 @@
     if (simSec - evtState.lastCheckSimSec < 6 * 3600) return;
     evtState.lastCheckSimSec = simSec;
 
-    const eIdx = earthIndex();
+    const nowMs = performance.now(); // still needed for resonance real-time throttle
+    const jd    = jdNow(simSec);    // used by conjunctions, resonances, eclipses
+    const eIdx  = earthIndex();
 
     // 1) Perihelion/Aphélion (per-planet) — Step 2: interpolated crossing time
     if (evtPeri && evtPeri.checked){

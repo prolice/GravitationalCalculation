@@ -36,8 +36,18 @@ function parseMasses(text) {
 function massesToKg(arr, unit) { return unit === 'kg' ? arr : arr.map(v => v * M_SUN); }
 function aToMeters(a, unit) { return unit === 'm' ? a : (unit === 'km' ? a * 1e3 : (unit === 'au' ? a * AU : a)); }
 
-// Kepler solver E (M = E − e sinE)
-function solveE(M, e) { let E = M; for (let i = 0; i < 6; i++) { const f = E - e * Math.sin(E) - M, fp = 1 - e * Math.cos(E); E -= f / fp; } return E; }
+// Kepler solver E (M = E − e sinE) — Newton-Raphson, convergence to 1e-12
+function solveE(M, e) {
+  let E = M;
+  for (let i = 0; i < 10; i++) {
+    const f = E - e * Math.sin(E) - M;
+    const fp = 1 - e * Math.cos(E);
+    const d = -f / fp;
+    E += d;
+    if (Math.abs(d) < 1e-12) break;
+  }
+  return E;
+}
 
 // Escaping HTML sans token invalide
 function escHtml(s) {

@@ -61,11 +61,9 @@ function julianDateUTC(\DateTime $dtUTC): float {
 
 // --------- Parser Horizons ---------
 /**
- * Parse EC, A, MA, W depuis le texte Horizons (CSV global, bloc $$SOE, ou lignes libellées).
- * Retourne ['e','a_au','M_deg','w_deg', 'raw_csv_header'=>?string]
+ * Parse EC, A, MA, W, IN, OM depuis le texte Horizons (CSV global, bloc $$SOE, ou lignes libellées).
+ * Retourne ['e','a_au','M_deg','w_deg','inc_deg','node_deg','raw_csv_header'=>?string]
  */
-/** Parse EC, A, MA, W depuis le texte Horizons (CSV global, bloc $$SOE, ou lignes libellées). */
-/** Parse EC, A, MA, W depuis le texte Horizons (CSV global, bloc $$SOE, ou lignes libellées). */
 function parse_elements_from_result(string $text): ?array {
   $lines = preg_split('/\R/', $text);
 
@@ -104,17 +102,20 @@ function parse_elements_from_result(string $text): ?array {
       if ($val === '' || $val[0] === '*' || $val[0] === '$') continue;
       if (strpos($val, ',') === false) continue; // sécurité: doit ressembler à une ligne CSV
       $map = $mkMap($hdrStr, $val);
-      $ec = isset($map['EC']) ? (float)$map['EC'] : null;
-      $a  = isset($map['A'])  ? (float)$map['A']  : null;
-      $ma = isset($map['MA']) ? (float)$map['MA'] : null;
-      $w  = isset($map['W'])  ? (float)$map['W']  : null;
+      $ec  = isset($map['EC']) ? (float)$map['EC'] : null;
+      $a   = isset($map['A'])  ? (float)$map['A']  : null;
+      $ma  = isset($map['MA']) ? (float)$map['MA'] : null;
+      $w   = isset($map['W'])  ? (float)$map['W']  : null;
+      $inc = isset($map['IN']) ? (float)$map['IN'] : null;
+      $om  = isset($map['OM']) ? (float)$map['OM'] : null;
 
       if ((!$finite($a)) && isset($map['QR']) && $finite($ec)) {
         $qr = (float)$map['QR'];
         if ($finite($qr) && $ec < 1.0) $a = $qr / (1 - $ec);
       }
       if ($finite($ec) && $finite($a) && $finite($ma) && $finite($w)) {
-        return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w, 'raw_csv_header'=>$hdrStr];
+        return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w,
+                'inc_deg'=>$inc, 'node_deg'=>$om, 'raw_csv_header'=>$hdrStr];
       }
       break; // header ok mais ligne de valeurs non parseable -> on tentera $$SOE plus bas
     }
@@ -139,41 +140,49 @@ function parse_elements_from_result(string $text): ?array {
       // Si on a l'entête global capté plus haut, on mappe avec lui
       if ($hdrStr) {
         $map = $mkMap($hdrStr, $dataLine);
-        $ec = isset($map['EC']) ? (float)$map['EC'] : null;
-        $a  = isset($map['A'])  ? (float)$map['A']  : null;
-        $ma = isset($map['MA']) ? (float)$map['MA'] : null;
-        $w  = isset($map['W'])  ? (float)$map['W']  : null;
+        $ec  = isset($map['EC']) ? (float)$map['EC'] : null;
+        $a   = isset($map['A'])  ? (float)$map['A']  : null;
+        $ma  = isset($map['MA']) ? (float)$map['MA'] : null;
+        $w   = isset($map['W'])  ? (float)$map['W']  : null;
+        $inc = isset($map['IN']) ? (float)$map['IN'] : null;
+        $om  = isset($map['OM']) ? (float)$map['OM'] : null;
         if ((!$finite($a)) && isset($map['QR']) && $finite($ec)) {
           $qr = (float)$map['QR'];
           if ($finite($qr) && $ec < 1.0) $a = $qr / (1 - $ec);
         }
         if ($finite($ec) && $finite($a) && $finite($ma) && $finite($w)) {
-          return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w, 'raw_csv_header'=>$hdrStr];
+          return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w,
+                  'inc_deg'=>$inc, 'node_deg'=>$om, 'raw_csv_header'=>$hdrStr];
         }
       }
       // Fallback **par index** (format 10 Horizons): JDTDB(0), CalDate(1), EC(2), QR(3), IN(4), OM(5), W(6), Tp(7), N(8), MA(9), TA(10), A(11), AD(12), PR(13)
       $V = array_map('trim', explode(',', $dataLine));
-      $ec = isset($V[2])  ? (float)$V[2]  : null;
-      $a  = isset($V[11]) ? (float)$V[11] : null;
-      $ma = isset($V[9])  ? (float)$V[9]  : null;
-      $w  = isset($V[6])  ? (float)$V[6]  : null;
+      $ec  = isset($V[2])  ? (float)$V[2]  : null;
+      $a   = isset($V[11]) ? (float)$V[11] : null;
+      $ma  = isset($V[9])  ? (float)$V[9]  : null;
+      $w   = isset($V[6])  ? (float)$V[6]  : null;
+      $inc = isset($V[4])  ? (float)$V[4]  : null;
+      $om  = isset($V[5])  ? (float)$V[5]  : null;
       if ((!$finite($a)) && isset($V[3]) && $finite($ec)) { // QR index 3
         $qr = (float)$V[3];
         if ($finite($qr) && $ec < 1.0) $a = $qr / (1 - $ec);
       }
       if ($finite($ec) && $finite($a) && $finite($ma) && $finite($w)) {
-        return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w, 'raw_csv_header'=>null];
+        return ['e'=>$ec, 'a_au'=>$a, 'M_deg'=>$ma, 'w_deg'=>$w,
+                'inc_deg'=>$inc, 'node_deg'=>$om, 'raw_csv_header'=>null];
       }
     }
   }
 
   // 3) Lignes libellées (rare avec format=10, mais on garde en secours)
-  $out = ['a_au'=>null,'e'=>null,'M_deg'=>null,'w_deg'=>null];
+  $out = ['a_au'=>null,'e'=>null,'M_deg'=>null,'w_deg'=>null,'inc_deg'=>null,'node_deg'=>null];
   foreach ($lines as $L) {
-    if (preg_match('/\bEC=\s*([\-0-9.E+]+)/', $L, $m)) $out['e']     = (float)$m[1];
-    if (preg_match('/\bA=\s*([\-0-9.E+]+)/',  $L, $m)) $out['a_au']  = (float)$m[1];
-    if (preg_match('/\bMA=\s*([\-0-9.E+]+)/', $L, $m)) $out['M_deg'] = (float)$m[1];
-    if (preg_match('/\bW\s*=\s*([\-0-9.E+]+)/', $L, $m)) $out['w_deg']= (float)$m[1];
+    if (preg_match('/\bEC=\s*([\-0-9.E+]+)/',  $L, $m)) $out['e']        = (float)$m[1];
+    if (preg_match('/\bA=\s*([\-0-9.E+]+)/',   $L, $m)) $out['a_au']     = (float)$m[1];
+    if (preg_match('/\bMA=\s*([\-0-9.E+]+)/',  $L, $m)) $out['M_deg']    = (float)$m[1];
+    if (preg_match('/\bW\s*=\s*([\-0-9.E+]+)/',$L, $m)) $out['w_deg']    = (float)$m[1];
+    if (preg_match('/\bIN=\s*([\-0-9.E+]+)/',  $L, $m)) $out['inc_deg']  = (float)$m[1];
+    if (preg_match('/\bOM=\s*([\-0-9.E+]+)/',  $L, $m)) $out['node_deg'] = (float)$m[1];
   }
   if ((!$finite($out['a_au'])) && $finite($out['e'] ?? null)) {
     foreach ($lines as $L) {
@@ -222,8 +231,8 @@ function jpl_fetch_elements(string $target, string $epochUtc, string $cacheDir):
     'REF_SYSTEM'  => "'J2000'",
     'CSV_FORMAT'  => "'YES'",
     'OBJ_DATA'    => "'NO'",
-    'TLIST'       => "'$epochUtc'", // 'YYYY-MM-DD HH:MM' (interprété avec TIME_TYPE)
-    'TIME_TYPE'   => "'TDB'",       // <— requis par Horizons pour les éléments osculateurs
+    'TLIST'       => "'$epochUtc'", // 'YYYY-MM-DD HH:MM' UTC
+    'TIME_TYPE'   => "'UTC'",       // UTC input avoids ~69s TDB-UTC offset
     'TP_TYPE'     => "'ABSOLUTE'",
     'MAKE_EPHEM'  => "'YES'",
     'OUT_UNITS'   => "'AU-D'",

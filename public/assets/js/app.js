@@ -503,6 +503,41 @@
     return mu / G;
   }
 
+  // BUG 3: convert N-body (r_AU, v_m/s) → osculating Keplerian elements
+  function stateToOsculating(r_au_vec, v_mps_vec, mu_m3s2) {
+    const rx = r_au_vec[0] * AU, ry = r_au_vec[1] * AU, rz = (r_au_vec[2] || 0) * AU;
+    const vx = v_mps_vec[0], vy = v_mps_vec[1], vz = (v_mps_vec[2] || 0);
+    const r = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    if (!(r > 0) || !(mu_m3s2 > 0)) return null;
+    const v2 = vx * vx + vy * vy + vz * vz;
+    const rdv = rx * vx + ry * vy + rz * vz;
+    // semi-major axis via vis-viva
+    const a_m = 1 / (2 / r - v2 / mu_m3s2);
+    // specific angular momentum h = r × v
+    const hx = ry * vz - rz * vy, hy = rz * vx - rx * vz, hz = rx * vy - ry * vx;
+    // eccentricity vector = (v × h)/μ − r̂
+    const vhx = vy * hz - vz * hy, vhy = vz * hx - vx * hz, vhz = vx * hy - vy * hx;
+    const evx = vhx / mu_m3s2 - rx / r;
+    const evy = vhy / mu_m3s2 - ry / r;
+    const evz = vhz / mu_m3s2 - rz / r;
+    const e = Math.sqrt(evx * evx + evy * evy + evz * evz);
+    // true anomaly: cos ν = (ê·r̂); sign from r̂·v > 0 → approaching perihelion
+    const cosNu_raw = (e > 1e-10) ? (evx * rx + evy * ry + evz * rz) / (e * r) : 1;
+    const nu = Math.acos(Math.max(-1, Math.min(1, cosNu_raw))) * (rdv >= 0 ? 1 : -1);
+    // eccentric anomaly
+    const cosE_raw = (e > 1e-10 && a_m > 0) ? (1 - r / a_m) / e : 0;
+    const E_val = Math.acos(Math.max(-1, Math.min(1, cosE_raw))) * (nu >= 0 ? 1 : -1);
+    const M_val = E_val - e * Math.sin(E_val);
+    // argument of perihelion (2-D projection onto XY plane)
+    const omegaDeg = Math.atan2(evy, evx) * 180 / Math.PI;
+    return {
+      a_au: a_m / AU, e, nu, E: E_val, M: M_val,
+      v: Math.sqrt(v2), r_au: r / AU,
+      omegaDeg,
+      x_au: rx / AU, y_au: ry / AU, z_au: rz / AU,
+    };
+  }
+
   // === UI: ajout planète (avec champ masse + gestion des lunes) ===
   function addPlanetRow(preset) {
     const id = nextId++;
@@ -820,7 +855,11 @@
         precession_deg_per_orbit: precess_deg_per_orbit,
         mass_kg, inc_deg, node_deg, moons
       });
-      state.push({ M: 0, omegaDeg: 0, trail: [], scrX: null, scrY: null, moons: moonStates });
+      // BUG 2: preserve JPL-derived M₀ and ω₀ across rebuilds
+      const _jpl = (window.PLANET_ELEM || {})[name] || null;
+      const _M0  = (_jpl && Number.isFinite(_jpl.M_deg))  ? _jpl.M_deg  * Math.PI / 180 : 0;
+      const _w0  = (_jpl && Number.isFinite(_jpl.w_deg))  ? _jpl.w_deg  : 0;
+      state.push({ M: _M0, omegaDeg: _w0, trail: [], scrX: null, scrY: null, moons: moonStates });
     });
     recomputeScale();
     rebuildLegend();
@@ -1354,24 +1393,12 @@
     const mu = getCentralMu();
     const Mstar = getStarMassKg();
     const onlyVis = instantOnlyVisibleChk && instantOnlyVisibleChk.checked;
+    const nbodyOn = !!(document.getElementById('nbodyMode') || {}).checked;
 
-    // Position Terre (option Δr Terre)
-    const idxEarth = planets.findIndex(p => p.name.trim().toLowerCase() === 'terre');
-    let earthPos = null;
-    if (idxEarth >= 0) {
-      const pE = planets[idxEarth]; const stE = state[idxEarth] || {M:0,omegaDeg:0};
-      if (pE && pE.period_s > 0) {
-        const E = solveE(stE.M, pE.e);
-        const r_au = pE.a_au * (1 - pE.e * Math.cos(E));
-        const cosNu = (Math.cos(E) - pE.e) / (1 - pE.e * Math.cos(E));
-        const sinNu = (Math.sqrt(1 - pE.e * pE.e) * Math.sin(E)) / (1 - pE.e * Math.cos(E));
-        const nu = Math.atan2(sinNu, cosNu);
-        const thetaDeg = (stE.omegaDeg + nu*180/Math.PI) % 360;
-        const x_au = r_au * Math.cos(thetaDeg*Math.PI/180);
-        const y_au = r_au * Math.sin(thetaDeg*Math.PI/180);
-        earthPos = {x_au, y_au};
-      }
-    }
+    // BUG 5: use 3D position via getPosAU for Earth reference
+    const idxEarth = earthIndex();
+    const earthPos3D = (idxEarth >= 0 && planets[idxEarth] && planets[idxEarth].period_s > 0)
+      ? getPosAU(idxEarth) : null;
 
     const rowsHtml = planets.map((p, i) => {
       if (onlyVis && !p.visible) return '';
@@ -1385,71 +1412,87 @@
           <td colspan="12" class="text-muted">—</td>
         </tr>`;
       }
-      const M = st.M;
-      const E = solveE(M, e);
-      const r_au = a_au * (1 - e * Math.cos(E));
-      const r_m = r_au * AU;
-      const cosNu = (Math.cos(E) - e) / (1 - e * Math.cos(E));
-      const sinNu = (Math.sqrt(1 - e * e) * Math.sin(E)) / (1 - e * Math.cos(E));
-      const nu = Math.atan2(sinNu, cosNu);
-      const omegaDeg = st.omegaDeg || 0;
-      const thetaDeg = degNorm(omegaDeg + nu * 180 / Math.PI);
-      const v = Math.sqrt(mu * (2 / r_m - 1 / a_m));
-      const h = Math.sqrt(mu * a_m * (1 - e * e));
-      const dthetadt = h / (r_m * r_m);
-      const dtheta_deg_day = (dthetadt * 180 / Math.PI * DAY_S).toFixed(5);
-      const x_au = r_au * Math.cos(thetaDeg * Math.PI / 180);
-      const y_au = r_au * Math.sin(thetaDeg * Math.PI / 180);
 
-      let dEarth = '—';
-      if (earthPos) {
-        const dx = x_au - earthPos.x_au;
-        const dy = y_au - earthPos.y_au;
-        dEarth = Math.sqrt(dx*dx + dy*dy).toFixed(6);
+      // BUG 3: in N-body mode compute osculating elements from (r, v); in Kepler use state
+      let r_au, nu, M_val, E_val, omegaDeg_val, v, x_au, y_au, z_au;
+      if (nbodyOn && nbodyState.positionsAU[i]) {
+        const pos3 = nbodyState.positionsAU[i];
+        const vel3 = nbodyState.velocitiesMps[i] || null;
+        r_au = Math.hypot(pos3[0], pos3[1], pos3[2] || 0);
+        x_au = pos3[0]; y_au = pos3[1]; z_au = pos3[2] || 0;
+        if (vel3) {
+          const osc = stateToOsculating(pos3, vel3, mu);
+          if (osc) {
+            nu = osc.nu; M_val = osc.M; E_val = osc.E;
+            omegaDeg_val = osc.omegaDeg; v = osc.v;
+          } else {
+            nu = 0; M_val = 0; E_val = 0; omegaDeg_val = st.omegaDeg || 0;
+            v = Math.sqrt(Math.max(0, mu * (2 / (r_au * AU) - 1 / a_m)));
+          }
+        } else {
+          nu = 0; M_val = 0; E_val = 0; omegaDeg_val = st.omegaDeg || 0;
+          v = Math.sqrt(Math.max(0, mu * (2 / (r_au * AU) - 1 / a_m)));
+        }
+      } else {
+        M_val = st.M;
+        E_val = solveE(M_val, e);
+        r_au = a_au * (1 - e * Math.cos(E_val));
+        const cosNu = (Math.cos(E_val) - e) / (1 - e * Math.cos(E_val));
+        const sinNu = (Math.sqrt(1 - e * e) * Math.sin(E_val)) / (1 - e * Math.cos(E_val));
+        nu = Math.atan2(sinNu, cosNu);
+        omegaDeg_val = st.omegaDeg || 0;
+        // BUG 5: use 3D getPosAU for coordinates
+        const pos3k = getPosAU(i);
+        x_au = pos3k[0]; y_au = pos3k[1]; z_au = pos3k[2] || 0;
+        v = Math.sqrt(Math.max(0, mu * (2 / (r_au * AU) - 1 / a_m)));
       }
 
-      const rev = (p.period_s > 0) ? ( (ticker.simTime / p.period_s).toFixed(3) ) : '—';
+      const r_m = r_au * AU;
+      const thetaDeg = degNorm((omegaDeg_val || 0) + (nu || 0) * 180 / Math.PI);
+      const h = Math.sqrt(Math.max(0, mu * a_m * (1 - e * e)));
+      const dthetadt = (h > 0 && r_m > 0) ? h / (r_m * r_m) : 0;
+      const dtheta_deg_day = (dthetadt * 180 / Math.PI * DAY_S).toFixed(5);
+
+      // BUG 5: 3D distance to Earth
+      let dEarth = '—';
+      if (earthPos3D) {
+        const dx = x_au - earthPos3D[0], dy = y_au - earthPos3D[1], dz = (z_au || 0) - (earthPos3D[2] || 0);
+        dEarth = Math.sqrt(dx * dx + dy * dy + dz * dz).toFixed(6);
+      }
+
+      const rev = (p.period_s > 0) ? (ticker.simTime / p.period_s).toFixed(3) : '—';
 
       let minPairDist = Infinity;
       let aPertSum = 0;
-      const aStar = (Mstar>0 && r_m>0) ? (G * Mstar / (r_m*r_m)) : 0;
+      const aStar = (Mstar > 0 && r_m > 0) ? (G * Mstar / (r_m * r_m)) : 0;
       planets.forEach((q, j) => {
-        if (j === i || !(q.period_s>0)) return;
-        const stQ = state[j] || {M:0,omegaDeg:0};
-        const EQ = solveE(stQ.M, q.e);
-        const r2_au = q.a_au * (1 - q.e * Math.cos(EQ));
-        const cosNu2 = (Math.cos(EQ) - q.e) / (1 - q.e * Math.cos(EQ));
-        const sinNu2 = (Math.sqrt(1 - q.e * q.e) * Math.sin(EQ)) / (1 - q.e * Math.cos(EQ));
-        const nu2 = Math.atan2(sinNu2, cosNu2);
-        const th2 = (stQ.omegaDeg + nu2*180/Math.PI) * Math.PI/180;
-        const x2 = r2_au * Math.cos(th2);
-        const y2 = r2_au * Math.sin(th2);
-        const dx = x_au - x2, dy = y_au - y2;
-        const d = Math.hypot(dx,dy);
+        if (j === i || !(q.period_s > 0)) return;
+        const posQ = getPosAU(j); // 3D
+        const dx = x_au - posQ[0], dy = y_au - posQ[1], dz = (z_au || 0) - (posQ[2] || 0);
+        const d = Math.hypot(dx, dy, dz);
         if (d < minPairDist) minPairDist = d;
-        const d_au_safe = Math.max(0.01, d);
-        const d_m = d_au_safe * AU;
-        if (q.mass_kg>0) aPertSum += G * q.mass_kg / (d_m*d_m);
+        const d_m = Math.max(0.01, d) * AU;
+        if (q.mass_kg > 0) aPertSum += G * q.mass_kg / (d_m * d_m);
       });
       const riskPair = (minPairDist < Infinity) ? Math.exp(-minPairDist / SIGMA_PAIR) : 0;
       const riskStar = Math.exp(-r_au / SIGMA_STAR);
-      const eta_now = (aStar>0) ? (aPertSum / aStar) : 0;
+      const eta_now = (aStar > 0) ? (aPertSum / aStar) : 0;
       const riskPert = Math.min(1, PERTURB_SCALE_INSTANT * eta_now);
       const riskNow = 1 - (1 - riskPair) * (1 - riskStar) * (1 - riskPert);
       const riskNowPct = (riskNow * 100).toFixed(1);
 
       const eyeClass = p.visible ? '' : ' off';
-      const etaNowTxt = eta_now>0 ? ` (η≈${(eta_now*100).toFixed(3)}%)` : '';
+      const etaNowTxt = eta_now > 0 ? ` (η≈${(eta_now * 100).toFixed(3)}%)` : '';
       return `<tr title="Perturbations instantanées${etaNowTxt}">
         <td><span class="legend-dot" style="background:${p.color}"></span> ${escHtml(p.name)}</td>
         <td><span class="vis-icon${eyeClass}" title="${p.visible ? 'Visible' : 'Masquée'}">👁️</span></td>
         <td>${fmt(r_au, 6)}</td>
-        <td>${fmt(nu * 180 / Math.PI, 3)}</td>
-        <td>${fmt(M * 180 / Math.PI, 3)}</td>
-        <td>${fmt(E * 180 / Math.PI, 3)}</td>
-        <td>${fmt(omegaDeg, 3)}</td>
+        <td>${fmt((nu || 0) * 180 / Math.PI, 3)}</td>
+        <td>${fmt((M_val || 0) * 180 / Math.PI, 3)}</td>
+        <td>${fmt((E_val || 0) * 180 / Math.PI, 3)}</td>
+        <td>${fmt(omegaDeg_val || 0, 3)}</td>
         <td>${fmt(thetaDeg, 3)}</td>
-        <td>${(v / 1000).toFixed(3)}</td>
+        <td>${((v || 0) / 1000).toFixed(3)}</td>
         <td>${dtheta_deg_day}</td>
         <td>${dEarth}</td>
         <td>${rev}</td>
@@ -1505,22 +1548,32 @@
   if (btnAddAll)    { btnAddAll.addEventListener('click', (e) => { e.preventDefault(); (window.ORDER8 || []).forEach(n => addPresetByName(n)); }); }
   if (btnAddPlanet) { btnAddPlanet.addEventListener('click', (e) => { e.preventDefault(); addPlanetRow(); }); }
 
-  // --- Appliquer les éléments JPL (a,e,M,ω) aux planètes déjà ajoutées ---
-  function applyPlanetElementsToState(){
+  // --- Appliquer les éléments JPL (a, e, M, ω, i, Ω) aux planètes déjà ajoutées ---
+  function applyPlanetElementsToState() {
     if (!window.PLANET_ELEM) return;
     planets.forEach((p, i) => {
       const el = window.PLANET_ELEM[p.name];
       if (!el) return;
-      if (Number.isFinite(el.a_au))   p.a_au = el.a_au;
-      if (Number.isFinite(el.e))      p.e    = el.e;
+      if (Number.isFinite(el.a_au)) p.a_au = el.a_au;
+      if (Number.isFinite(el.e))    p.e    = el.e;
       if (state[i]) {
-        if (Number.isFinite(el.M_deg)) state[i].M        = el.M_deg * Math.PI/180;
+        if (Number.isFinite(el.M_deg)) state[i].M        = el.M_deg * Math.PI / 180;
         if (Number.isFinite(el.w_deg)) state[i].omegaDeg = el.w_deg;
+      }
+      // BUG 1: apply inclination and node — also write to UI fields so rebuildModel keeps them
+      const row = document.querySelector(`#planetsList .planet-row[data-pid="${p.id}"]`);
+      if (Number.isFinite(el.inc_deg)) {
+        p.inc_deg = el.inc_deg;
+        if (row) { const f = row.querySelector('.p-inc');  if (f) f.value = el.inc_deg.toFixed(4); }
+      }
+      if (Number.isFinite(el.node_deg)) {
+        p.node_deg = el.node_deg;
+        if (row) { const f = row.querySelector('.p-node'); if (f) f.value = el.node_deg.toFixed(4); }
       }
       // Recalcule période avec nouveau a
       const mu = getCentralMu();
       const a_m = p.a_au * AU;
-      if (mu>0 && a_m>0) p.period_s = 2*Math.PI*Math.sqrt((a_m**3)/mu);
+      if (mu > 0 && a_m > 0) p.period_s = 2 * Math.PI * Math.sqrt((a_m ** 3) / mu);
     });
     recomputeScale();
     renderPlanetStats();
@@ -1610,32 +1663,41 @@
 
   // N-body worker
   let nbodyWorker = null;
-  let nbodyState = { simSec: 0, positionsAU: [] };
-  function killNBody(){ if (nbodyWorker){ nbodyWorker.terminate(); nbodyWorker = null; } }
-  function currentElementsForNBody(){
+  let nbodyState = { simSec: 0, positionsAU: [], velocitiesMps: [] };
+  function killNBody() { if (nbodyWorker) { nbodyWorker.terminate(); nbodyWorker = null; } }
+  function currentElementsForNBody() {
     const bodies = []; const Mstar = getStarMassKg();
-    planets.forEach((p,i)=>{
-      if (!p.visible || !(p.period_s>0)) return;
-      const st = state[i]; const M = (st.M||0); const omega_deg = (st.omegaDeg||0);
-      bodies.push({ name:p.name, color:p.color, mass_kg: p.mass_kg || (PLANET_MASS_KG[p.name]||0),
-        a_m: p.a_au*AU, e:p.e||0, inc_deg:p.inc_deg||0, node_deg:p.node_deg||0, omega_deg, M_rad:M });
+    planets.forEach((p, i) => {
+      if (!p.visible || !(p.period_s > 0)) return;
+      const st = state[i]; const M = (st.M || 0); const omega_deg = (st.omegaDeg || 0);
+      bodies.push({ name: p.name, color: p.color, mass_kg: p.mass_kg || (PLANET_MASS_KG[p.name] || 0),
+        a_m: p.a_au * AU, e: p.e || 0, inc_deg: p.inc_deg || 0, node_deg: p.node_deg || 0,
+        omega_deg, M_rad: M });
     });
     return { Mstar, bodies };
   }
-  function ensureNBodyStarted(){
+  function ensureNBodyStarted() {
     const tog = document.getElementById('nbodyMode'); if (!tog || !tog.checked) return;
-    if (!nbodyWorker){
+    if (!nbodyWorker) {
       nbodyWorker = new Worker('assets/js/nbody.worker.js');
-      nbodyWorker.onmessage = (e)=>{
-        const msg = e.data||{};
-        if (msg.type==='state'){ nbodyState = { simSec: msg.simSec||0, positionsAU: msg.positionsAU||[] }; drawScene(0); }
+      nbodyWorker.onmessage = (e) => {
+        const msg = e.data || {};
+        if (msg.type === 'state') {
+          nbodyState = {
+            simSec: msg.simSec || 0,
+            positionsAU:   msg.positionsAU   || [],
+            velocitiesMps: msg.velocitiesMps || [],
+          };
+          drawScene(0);
+        }
       };
-      const soft_au = Math.max(0, parseFloat((document.getElementById('nbodySoftAU')||{}).value||'0') || 0);
+      const soft_au = Math.max(0, parseFloat((document.getElementById('nbodySoftAU') || {}).value || '0') || 0);
       const init = currentElementsForNBody();
-      nbodyWorker.postMessage({ type:'init', Mstar: init.Mstar, bodies: init.bodies, soft_au });
+      const grOn = !!(document.getElementById('showPrecession') || {}).checked;
+      nbodyWorker.postMessage({ type: 'init', Mstar: init.Mstar, bodies: init.bodies, soft_au, gr: grOn });
     }
   }
-  function stepNBodyTo(simSec){ if (nbodyWorker) nbodyWorker.postMessage({ type:'advance', targetSimSec: simSec }); }
+  function stepNBodyTo(simSec) { if (nbodyWorker) nbodyWorker.postMessage({ type: 'advance', targetSimSec: simSec }); }
 
 // Démarrage app: ajoute 2 planètes de base puis applique JPL
   function startApp() {
@@ -1660,9 +1722,11 @@
 
 		
 	  const _tog = document.getElementById('nbodyMode');
-	  if (_tog) _tog.addEventListener('change', ()=>{ if (_tog.checked){ killNBody(); ensureNBodyStarted(); } else { killNBody(); } drawScene(0); });
+	  if (_tog) _tog.addEventListener('change', () => { if (_tog.checked) { killNBody(); ensureNBodyStarted(); } else { killNBody(); } drawScene(0); });
 	  const _soft = document.getElementById('nbodySoftAU');
-	  if (_soft) _soft.addEventListener('change', ()=>{ if (nbodyWorker){ nbodyWorker.postMessage({type:'setsoft', soft_au: Math.max(0, parseFloat(_soft.value||'0')||0)}); } });
+	  if (_soft) _soft.addEventListener('change', () => { if (nbodyWorker) { nbodyWorker.postMessage({ type: 'setsoft', soft_au: Math.max(0, parseFloat(_soft.value || '0') || 0) }); } });
+	  // sync GR toggle to worker when showPrecession changes
+	  if (showPrecChk) showPrecChk.addEventListener('change', () => { if (nbodyWorker) nbodyWorker.postMessage({ type: 'setgr', enabled: showPrecChk.checked }); });
 	  const _pitch = document.getElementById('camPitch'); if (_pitch) _pitch.addEventListener('input', ()=>{ setCameraFromUI(); drawScene(0); });
 	  const _yaw = document.getElementById('camYaw'); if (_yaw) _yaw.addEventListener('input', ()=>{ setCameraFromUI(); drawScene(0); });
 
